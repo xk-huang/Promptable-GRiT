@@ -1,3 +1,16 @@
+# Promptable GRiT
+
+Modified from https://github.com/JialianW/GRiT/.
+
+Add an gradio app to support inference with both automatic proposal generation and custom point/box prompts.
+Install gradio with `pip install gradio`.
+
+```python
+python promptable_grit_app.py
+```
+
+<p align="center"> <img src='docs/gradio.jpg' align="center" height="400px"> </p>
+
 # GRiT: A Generative Region-to-text Transformer for Object Understanding
 GRiT is a general and open-set object understanding framework that localizes objects and
 describes them with any style of free-form texts it was trained with, e.g., class names, descriptive sentences 

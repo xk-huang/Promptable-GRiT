@@ -238,6 +238,21 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
             )
 
             assert len(pred_instances) == 1, "Only support one image"
+
+            if len(proposals[0]) == 1:
+                logger.info(f"only one proposal in the image, in promptable mode. Replace box with proposals")
+                input_boxes = proposals[0].proposal_boxes.tensor
+                print(f"input_boxes: {input_boxes}")
+                if torch.allclose(input_boxes[0, 0], input_boxes[0, 2]):
+                    input_boxes[0, 2] += 1
+                if torch.allclose(input_boxes[0, 1], input_boxes[0, 3]):
+                    input_boxes[0, 3] += 1
+                print(f"input_boxes after check: {input_boxes}")
+                
+                pred_instances = [
+                    Instances(pred_instances[0].image_size, pred_boxes=Boxes(input_boxes), scores=proposals[0].objectness_logits, pred_classes=torch.zeros(1))
+                ]
+
             for i, pred_instance in enumerate(pred_instances):
                 if len(pred_instance.pred_boxes) > 0:
                     object_features = self.object_feat_pooler(features, [pred_instance.pred_boxes])
