@@ -4,6 +4,7 @@ import logging
 import sys
 import time
 from argparse import Namespace
+import multiprocessing as mp
 
 import detectron2.data.transforms as T
 import gradio as gr
@@ -218,13 +219,57 @@ class PromptableGRiTInferenceEngine:
         Returns:
             _type_: _description_
         """
+
+        def save_results(queue, conn):
+            results = []
+            region_cnt = 0
+            while True:
+                batch = queue.get()
+                if batch is None:
+                    break
+
+                pred_captions = batch["pred_captions"]
+                gt_captions = batch["gt_captions"]
+                input_boxes = batch["input_boxes"]
+                region_ids = batch["region_ids"]
+
+                image_id = batch["image_id"]
+                split_name = batch["split_name"]
+
+                for pred_caption, gt_caption, input_box, region_id in zip(
+                    pred_captions, gt_captions, input_boxes, region_ids
+                ):
+                    result = dict(
+                        _id=region_cnt,
+                        split=split_name,
+                        references=gt_caption,
+                        candidates=pred_caption,
+                        metadata=dict(
+                            metadata_input_boxes=input_box,
+                            metadata_image_id=image_id,
+                            metadata_region_id=region_id,
+                        ),
+                        logits=dict(iou_scores=[1.0]),
+                    )
+                    region_cnt += 1
+                    results.append(result)
+            # Send the results back to the main process through the Pipe
+            conn.send(results)
+            conn.close()
+
         # NOTE: num_workers=0 is for debugging
         dataloader = dataset.build_dataloader()
 
         if max_samples is None:
             max_samples = len(dataset)
 
-        region_cnt = 0
+        # Create a queue to store the results and start the saving process
+        result_queue = mp.Queue()
+        # Create a Pipe for communication between main process and subprocess
+        parent_conn, child_conn = mp.Pipe()
+        save_process = mp.Process(target=save_results, args=(result_queue, child_conn))
+        save_process.start()
+
         results = []
         for sample_id, batch in enumerate(tqdm.tqdm(dataloader)):
             if sample_id == max_samples:
@@ -238,30 +283,26 @@ class PromptableGRiTInferenceEngine:
 
             pred_captions = self.inference_text(input_image, input_boxes)
             if len(pred_captions) != len(gt_captions):
-                import IPython
-
-                IPython.embed()
                 raise ValueError(
-                    f"len(pred_captions) != len(gt_captions): {len(pred_captions)} != {len(gt_captions)} at {sample_id}-{region_cnt}"
+                    f"len(pred_captions) != len(gt_captions): {len(pred_captions)} != {len(gt_captions)} at {sample_id}"
                 )
+            result_queue.put(
+                dict(
+                    pred_captions=pred_captions,
+                    gt_captions=gt_captions,
+                    input_boxes=input_boxes,
+                    image_id=image_id,
+                    region_ids=region_ids,
+                    split_name=split_name,
+                )
+            )
 
-            for pred_caption, gt_caption, input_box, region_id in zip(
-                pred_captions, gt_captions, input_boxes, region_ids
-            ):
-                result = dict(
-                    _id=region_cnt,
-                    split=split_name,
-                    references=gt_caption,
-                    candidates=pred_caption,
-                    metadata=dict(
-                        metadata_input_boxes=input_box,
-                        metadata_image_id=image_id,
-                        metadata_region_id=region_id,
-                    ),
-                    logits=dict(iou_scores=[1.0]),
-                )
-                region_cnt += 1
-                results.append(result)
+        # Signal the saving process to finish
+        result_queue.put(None)
+
+        # Wait for the saving process to complete and get the results
+        save_process.join()
+        results = parent_conn.recv()
 
         return results
 
@@ -382,8 +423,8 @@ infer_engine = PromptableGRiTInferenceEngine(args)
 eval_dataset = prepare_dataset(split="test")
 eval_infer_dataset = InferenceDataset(eval_dataset)
 
-# NOTE: num_workers=0 is for debugging
+# NOTE: max_samples=10 is for debugging
 results = infer_engine.inference_dataset(eval_infer_dataset, split_name="inference")
 
-with open("results.json", "w") as f:
+with open("grit-vg-densecap-local.json", "w") as f:
     json.dump(results, f, indent=4)
