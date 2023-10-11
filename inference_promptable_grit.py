@@ -1,14 +1,15 @@
-import datasets
 import inspect
+import json
 import logging
 import sys
 import time
 from argparse import Namespace
-import tqdm
 
 import detectron2.data.transforms as T
 import gradio as gr
+import numpy as np
 import torch
+import tqdm
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
 from detectron2.data.detection_utils import convert_PIL_to_numpy
@@ -16,7 +17,9 @@ from detectron2.modeling import build_model
 from detectron2.structures import Boxes, Instances
 from detectron2.utils.visualizer import ColorMode
 from PIL import Image
-import numpy as np
+from torch.utils.data import DataLoader, Dataset
+
+import datasets
 
 sys.path.insert(0, "third_party/CenterNet2/projects/CenterNet2/")
 from centernet.config import add_centernet_config
@@ -51,6 +54,70 @@ def prepare_dataset(split="test"):
     )
 
     return dataset
+
+
+class InferenceDataset(Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
+        self.num_samples = len(dataset)
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        return self.convert_sample_format(self.dataset[idx])
+
+    @staticmethod
+    def convert_sample_format(sample):
+        """_summary_
+
+        Args:
+            sample (_type_): _description_
+
+        Returns:
+            dict:
+                input_image: PIL,
+                input_boxes: list or list of int, Nx4
+                gt_captions: list of list of str, Nx1
+
+        """
+        input_image = sample["image"]
+        image_id = sample["image_id"]
+
+        regions = sample["regions"]
+        input_boxes = []
+        gt_captions = []
+        region_ids = []
+        for region in regions:
+            x, y, w, h = region["x"], region["y"], region["width"], region["height"]
+            x2, y2 = x + w, y + h
+            input_box = [x, y, x2, y2]
+            input_boxes.append(input_box)
+            gt_captions.append(region["phrases"])
+            region_ids.append(region["region_id"])
+
+        return dict(
+            input_image=input_image,
+            input_boxes=input_boxes,
+            gt_captions=gt_captions,
+            image_id=image_id,
+            region_ids=region_ids,
+        )
+
+    def build_dataloader(self, batch_size=1, num_workers=4, shuffle=False):
+        if batch_size != 1:
+            raise ValueError("batch_size should be 1 in GRiT")
+
+        def _collate_func(batch):
+            return batch[0]
+
+        return DataLoader(
+            self,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            shuffle=shuffle,
+            collate_fn=_collate_func,
+        )
 
 
 class PromptableGRiTInferenceEngine:
@@ -117,15 +184,6 @@ class PromptableGRiTInferenceEngine:
         self.inputs = None
         self.encoded_image_dict = None
 
-    def _encode_image_with_botton(self, input_image):
-        aug_transform, image, inputs, encoded_image_dict = self._encode_image(
-            input_image
-        )
-        self.aug_transform = aug_transform
-        self.image = image
-        self.inputs = inputs
-        self.encoded_image_dict = encoded_image_dict
-
     @torch.no_grad()
     def _encode_image(self, input_image):
         if not isinstance(input_image, Image.Image):
@@ -148,6 +206,64 @@ class PromptableGRiTInferenceEngine:
         inputs = {"image": image, "height": height, "width": width}
         encoded_image_dict = self.model.encode_image([inputs])
         return aug_transform, image, inputs, encoded_image_dict
+
+    def inference_dataset(
+        self, dataset: InferenceDataset, split_name="inference", max_samples=None
+    ):
+        """_summary_
+
+        Args:
+            dataset (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        # NOTE: num_workers=0 is for debugging
+        dataloader = dataset.build_dataloader()
+
+        if max_samples is None:
+            max_samples = len(dataset)
+
+        region_cnt = 0
+        results = []
+        for sample_id, batch in enumerate(tqdm.tqdm(dataloader)):
+            if sample_id == max_samples:
+                break
+
+            input_image = batch["input_image"]
+            input_boxes = batch["input_boxes"]
+            gt_captions = batch["gt_captions"]
+            image_id = batch["image_id"]
+            region_ids = batch["region_ids"]
+
+            pred_captions = self.inference_text(input_image, input_boxes)
+            if len(pred_captions) != len(gt_captions):
+                import IPython
+
+                IPython.embed()
+                raise ValueError(
+                    f"len(pred_captions) != len(gt_captions): {len(pred_captions)} != {len(gt_captions)} at {sample_id}-{region_cnt}"
+                )
+
+            for pred_caption, gt_caption, input_box, region_id in zip(
+                pred_captions, gt_captions, input_boxes, region_ids
+            ):
+                result = dict(
+                    _id=region_cnt,
+                    split=split_name,
+                    references=gt_caption,
+                    candidates=pred_caption,
+                    metadata=dict(
+                        metadata_input_boxes=input_box,
+                        metadata_image_id=image_id,
+                        metadata_region_id=region_id,
+                    ),
+                    logits=dict(iou_scores=[1.0]),
+                )
+                region_cnt += 1
+                results.append(result)
+
+        return results
 
     def inference_text(self, input_image, input_boxes):
         """_summary_
@@ -190,12 +306,9 @@ class PromptableGRiTInferenceEngine:
         input_boxes=None,
         input_points=None,
     ):
-        if self.encoded_image_dict is None:
-            self._encode_image_with_botton(input_image)
-        aug_transform = self.aug_transform
-        image = self.image
-        inputs = self.inputs
-        encoded_image_dict = self.encoded_image_dict
+        aug_transform, image, inputs, encoded_image_dict = self._encode_image(
+            input_image
+        )
 
         if input_points is None and input_boxes is None:
             raise ValueError("input_points or input_boxes should not be None.")
@@ -267,42 +380,10 @@ args.cpu = False
 infer_engine = PromptableGRiTInferenceEngine(args)
 
 eval_dataset = prepare_dataset(split="test")
+eval_infer_dataset = InferenceDataset(eval_dataset)
 
+# NOTE: num_workers=0 is for debugging
+results = infer_engine.inference_dataset(eval_infer_dataset, split_name="inference")
 
-def convert_sample_format(sample):
-    """_summary_
-
-    Args:
-        sample (_type_): _description_
-
-    Returns:
-        dict:
-            input_image: PIL,
-            input_boxes: list or list of int, Nx4
-            gt_captions: list of list of str, Nx1
-
-    """
-    input_image = sample["image"]
-    regions = sample["regions"]
-    input_boxes = []
-    gt_captions = []
-    for region in regions:
-        x, y, w, h = region["x"], region["y"], region["width"], region["height"]
-        x2, y2 = x + w, y + h
-        input_box = [x, y, x2, y2]
-        input_boxes.append(input_box)
-        gt_captions.append(region["phrases"])
-
-    return dict(
-        input_image=input_image, input_boxes=input_boxes, gt_captions=gt_captions
-    )
-
-
-sample = eval_dataset[0]
-input_dict = convert_sample_format(sample)
-gt_captions = input_dict.pop("gt_captions")
-infer_engine.inference_text(**input_dict)
-
-import IPython
-
-IPython.embed()
+with open("results.json", "w") as f:
+    json.dump(results, f, indent=4)
