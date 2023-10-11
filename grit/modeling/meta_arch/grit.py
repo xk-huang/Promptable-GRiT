@@ -25,12 +25,14 @@ class GRiT(GeneralizedRCNN):
         batched_inputs: Tuple[Dict[str, torch.Tensor]],
         detected_instances: Optional[List[Instances]] = None,
         do_postprocess: bool = True,
-        # For multiple run inference on the same image without re-encoding
-        encoded_image_dict: Optional[dict] = None
+        # NOTE: For multiple run inference on the same image without re-encoding
+        encoded_image_dict: Optional[dict] = None,
+        replace_pred_boxes_with_proposals: bool = False,
     ):
         assert not self.training
         assert detected_instances is None
 
+        # NOTE: Modified to support multiple run inference on the same image without re-encoding
         if encoded_image_dict is None:
             encoded_image_dict = self.encode_image(batched_inputs)
         images = encoded_image_dict['images']
@@ -41,7 +43,10 @@ class GRiT(GeneralizedRCNN):
             proposals, _ = self.proposal_generator(images, features, None)
         else:
             proposals = [x["proposals"].to(self.device) for x in batched_inputs]
-        results, _ = self.roi_heads(features, proposals)
+        
+        # NOTE: Modified to support multiple run inference on the same image without re-encoding
+        results, _ = self.roi_heads(features, proposals, replace_pred_boxes_with_proposals=replace_pred_boxes_with_proposals)
+
         if do_postprocess:
             assert not torch.jit.is_scripting(), \
                 "Scripting is not supported for postprocess."

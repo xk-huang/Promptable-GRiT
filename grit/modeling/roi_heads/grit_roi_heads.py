@@ -148,7 +148,7 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
                 proposals[0].foreground[0] = 1
         return proposals
 
-    def _forward_box(self, features, proposals, targets=None, task="ObjectDet"):
+    def _forward_box(self, features, proposals, targets=None, task="ObjectDet", replace_pred_boxes_with_proposals=False):
         if self.training:
             proposals = self.check_if_all_background(proposals, targets, 0)
         if (not self.training) and self.mult_proposal_score:
@@ -239,18 +239,17 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
 
             assert len(pred_instances) == 1, "Only support one image"
 
-            if len(proposals[0]) == 1:
-                logger.info(f"only one proposal in the image, in promptable mode. Replace box with proposals")
+            if replace_pred_boxes_with_proposals is True:
+                logger.info(f"replace pred_boxes with proposals")
                 input_boxes = proposals[0].proposal_boxes.tensor
-                print(f"input_boxes: {input_boxes}")
-                if torch.allclose(input_boxes[0, 0], input_boxes[0, 2]):
-                    input_boxes[0, 2] += 1
-                if torch.allclose(input_boxes[0, 1], input_boxes[0, 3]):
-                    input_boxes[0, 3] += 1
-                print(f"input_boxes after check: {input_boxes}")
-                
+                # NOTE: add 1 if there are same widths/heights
+                x2 = torch.where(input_boxes[:, 2] == input_boxes[:, 0],  input_boxes[:, 2] + 1, input_boxes[:, 2])
+                y2 = torch.where(input_boxes[:, 3] == input_boxes[:, 1],  input_boxes[:, 3] + 1, input_boxes[:, 3])
+                input_boxes[:, 2] = x2
+                input_boxes[:, 3] = y2
+
                 pred_instances = [
-                    Instances(pred_instances[0].image_size, pred_boxes=Boxes(input_boxes), scores=proposals[0].objectness_logits, pred_classes=torch.zeros(1))
+                    Instances(pred_instances[0].image_size, pred_boxes=Boxes(input_boxes), scores=proposals[0].objectness_logits, pred_classes=torch.zeros(len(input_boxes), dtype=torch.int64))
                 ]
 
             for i, pred_instance in enumerate(pred_instances):
@@ -309,7 +308,7 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
             return pred_instances
 
 
-    def forward(self, features, proposals, targets=None, targets_task="ObjectDet"):
+    def forward(self, features, proposals, targets=None, targets_task="ObjectDet", replace_pred_boxes_with_proposals=False):
         if self.training:
             proposals = self.label_and_sample_proposals(
                 proposals, targets)
@@ -323,7 +322,7 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
                 losses.update(self._get_empty_mask_loss(device=proposals[0].objectness_logits.device))
             return proposals, losses
         else:
-            pred_instances = self._forward_box(features, proposals, task=self.test_task)
+            pred_instances = self._forward_box(features, proposals, task=self.test_task, replace_pred_boxes_with_proposals=replace_pred_boxes_with_proposals)
             pred_instances = self.forward_with_given_boxes(features, pred_instances)
             return pred_instances, {}
 

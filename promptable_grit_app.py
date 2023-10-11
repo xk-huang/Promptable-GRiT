@@ -20,8 +20,8 @@ from centernet.config import add_centernet_config
 from grit.config import add_grit_config
 from grit.predictor import Visualizer_GRiT
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, force=True)
 
 
 class PromptableGRiTGradioApp:
@@ -251,9 +251,12 @@ class PromptableGRiTGradioApp:
         encoded_image_dict = self.encoded_image_dict
 
         if visual_prompt_mode == "auto":
+            # NOTE: from detectron2/modeling/meta_arch/rcnn.py:GeneralizedRCNN, use proposal_generator as usual
             self.model.proposal_generator = self.proposal_generator
             predictions = self.model.inference(
-                [inputs], encoded_image_dict=encoded_image_dict
+                [inputs],
+                encoded_image_dict=encoded_image_dict,
+                replace_pred_boxes_with_proposals=False,
             )[
                 0
             ]  # Automatically generate proposals
@@ -267,6 +270,7 @@ class PromptableGRiTGradioApp:
             elif input_points is not None and input_boxes is None:
                 input_boxes = [input_points[0] + input_points[0]]
 
+            # NOTE: from detectron2/modeling/meta_arch/rcnn.py:GeneralizedRCNN, only by setting `proposal_generator=None`, the model will use the proposals in inputs
             self.model.proposal_generator = None
             input_boxes = aug_transform.apply_box(input_boxes)
             input_height, input_width = image.shape[-2:]
@@ -280,7 +284,9 @@ class PromptableGRiTGradioApp:
 
             # NOTE: The **batch system** of Detectron2 is to **use List**
             predictions = self.model.inference(
-                [inputs], encoded_image_dict=encoded_image_dict
+                [inputs],
+                encoded_image_dict=encoded_image_dict,
+                replace_pred_boxes_with_proposals=True,
             )[
                 0
             ]  # Assign proposals
