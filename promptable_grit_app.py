@@ -14,6 +14,7 @@ from detectron2.modeling import build_model
 from detectron2.structures import Boxes, Instances
 from detectron2.utils.visualizer import ColorMode
 from PIL import Image
+import numpy as np
 
 sys.path.insert(0, "third_party/CenterNet2/projects/CenterNet2/")
 from centernet.config import add_centernet_config
@@ -268,17 +269,21 @@ class PromptableGRiTGradioApp:
                     "input_points and input_boxes should not be both not None."
                 )
             elif input_points is not None and input_boxes is None:
-                input_boxes = [input_points[0] + input_points[0]]
+                input_points = np.asarray(input_points)
+                input_boxes = np.concatenate([input_points, input_points], axis=-1)
 
             # NOTE: from detectron2/modeling/meta_arch/rcnn.py:GeneralizedRCNN, only by setting `proposal_generator=None`, the model will use the proposals in inputs
             self.model.proposal_generator = None
+            # NOTE: from fvcore/transforms/transform.py:apply_box, which takes in Nx4 np array.
+            # It call `detectron2/data/transforms/transform.py:apply_coords` which casts the dtype to fp32.
             input_boxes = aug_transform.apply_box(input_boxes)
             input_height, input_width = image.shape[-2:]
+            num_boxes = len(input_boxes)
             proposals = Instances(
                 (input_height, input_width),
                 proposal_boxes=Boxes(input_boxes),
-                scores=torch.ones(1),
-                objectness_logits=torch.ones(1),
+                scores=torch.ones(num_boxes),
+                objectness_logits=torch.ones(num_boxes),
             )
             inputs.update(dict(proposals=proposals))
 
