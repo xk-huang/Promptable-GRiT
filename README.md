@@ -11,6 +11,16 @@ python promptable_grit_app.py
 
 <p align="center"> <img src='docs/gradio.jpg' align="center" height="400px"> </p>
 
+# Inference
+
+## With HF datasets
+
+```
+datasets==2.13.1
+python-dotenv==1.0.0
+ipython
+```
+
 # GRiT: A Generative Region-to-text Transformer for Object Understanding
 GRiT is a general and open-set object understanding framework that localizes objects and
 describes them with any style of free-form texts it was trained with, e.g., class names, descriptive sentences 
