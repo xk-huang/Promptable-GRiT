@@ -5,6 +5,7 @@ import sys
 import time
 from argparse import Namespace
 import multiprocessing as mp
+import os
 
 import detectron2.data.transforms as T
 import gradio as gr
@@ -28,7 +29,8 @@ from grit.config import add_grit_config
 from grit.predictor import Visualizer_GRiT
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, force=True)
+filname = os.getenv("LOG_FILENAME", "inference_promptable_grit.log")
+logging.basicConfig(level=logging.INFO, filename=filname, filemode="w", force=True)
 
 
 def prepare_dataset(split="test"):
@@ -36,6 +38,9 @@ def prepare_dataset(split="test"):
     # in case you want to inference on your own dataset, you need to write your own data script
     path = "/home/v-yijicheng/xiaoke/segment-caption-anything-v2/src/data/data_scripts/visual_genome-densecap-local.py"
     name = "densecap"
+    if os.getenv("USE_GRIT_SPLIT") is not None:
+        path = '/home/v-yijicheng/xiaoke/segment-caption-anything-v2/src/data/data_scripts/visual_genome-grit-local.py'
+        name = "grit"
     # split = None
     cache_dir = "/home/v-yijicheng/xiaoke/segment-caption-anything-v2/.data.cache"
     streaming = False
@@ -58,18 +63,22 @@ def prepare_dataset(split="test"):
 
 
 class InferenceDataset(Dataset):
-    def __init__(self, dataset):
+    def __init__(self, dataset, sample_ids=None):
         self.dataset = dataset
-        self.num_samples = len(dataset)
+        if sample_ids is None:
+            self.num_samples = len(dataset)
+        else:
+            self.num_samples = len(sample_ids)
+            self.dataset = [self.dataset[i] for i in sample_ids]
+            logger.info(f"len(self.dataset): {len(self.dataset)}")
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        return self.convert_sample_format(self.dataset[idx])
+        return self.convert_sample_format(self.dataset[idx], idx)
 
-    @staticmethod
-    def convert_sample_format(sample):
+    def convert_sample_format(self, sample, idx):
         """_summary_
 
         Args:
@@ -96,6 +105,39 @@ class InferenceDataset(Dataset):
             input_boxes.append(input_box)
             gt_captions.append(region["phrases"])
             region_ids.append(region["region_id"])
+        # import matplotlib.pyplot as plt
+        # # Plot the image
+        # input_image_np = np.array(input_image)
+        # fig, ax = plt.subplots(1)
+        # ax.imshow(input_image_np)
+        # for box in input_boxes:
+        #     x, y, x2, y2 = box
+        #     w, h = x2 - x, y2 - y
+        #     rect = plt.Rectangle((x, y), w, h, linewidth=1, edgecolor='r', facecolor='none')
+        #     ax.add_patch(rect)
+        # input_boxes = np.array(input_boxes)
+        # x_min, y_min, x_max, y_max = input_boxes[:, 0].min(), input_boxes[:, 1].min(), input_boxes[:, 2].max(), input_boxes[:, 3].max()
+        # ax.set_xlim(x_min, x_max)
+        # ax.set_ylim(y_min, y_max)
+        # plt.savefig("test_bbox.png")
+
+        input_boxes, gt_captions, region_ids = self._normalize_regions(idx, input_image, image_id, input_boxes, gt_captions, region_ids)
+
+        # # Plot the image
+        # input_image_np = np.array(input_image)
+        # fig, ax = plt.subplots(1)
+        # ax.imshow(input_image_np)
+        # for box in input_boxes:
+        #     x, y, x2, y2 = box
+        #     w, h = x2 - x, y2 - y
+        #     rect = plt.Rectangle((x, y), w, h, linewidth=1, edgecolor='r', facecolor='none')
+        #     ax.add_patch(rect)
+        # x_min, y_min, x_max, y_max = input_boxes[:, 0].min(), input_boxes[:, 1].min(), input_boxes[:, 2].max(), input_boxes[:, 3].max()
+        # ax.set_xlim(x_min, x_max)
+        # ax.set_ylim(y_min, y_max)
+        # plt.savefig("test_bbox.after_norm.png")
+        # import IPython; IPython.embed()
+        
 
         return dict(
             input_image=input_image,
@@ -104,6 +146,64 @@ class InferenceDataset(Dataset):
             image_id=image_id,
             region_ids=region_ids,
         )
+
+    def _normalize_regions(self, idx, input_image, image_id, input_boxes, gt_captions, region_ids):
+        image_width = input_image.width
+        image_height = input_image.height
+        input_boxes = np.asarray(input_boxes)
+
+        if np.any(input_boxes < 0):
+            corrupted_indices = np.where(input_boxes < 0)[0]
+            corrupted_boxes = input_boxes[corrupted_indices]
+            corrupted_region_ids = [region_ids[i] for i in corrupted_indices]
+            logger.error(f"[{image_id}({idx})]\tinput_boxes < 0, got\t{corrupted_boxes} at {image_id}({idx})-{corrupted_region_ids}({corrupted_indices})")
+            input_boxes = np.clip(input_boxes, 0, None)
+
+        if np.any(input_boxes[:, [0, 2]] >= image_width):
+            corrupted_indices = np.where(input_boxes[:, [0, 2]] >= image_width)[0]
+            corrupted_boxes = input_boxes[corrupted_indices]
+            corrupted_region_ids = [region_ids[i] for i in corrupted_indices]
+            logger.error(f"[{image_id}({idx})]\tinput_boxes[:, [0, 2]] >= image_width({image_width}),\tgot {corrupted_boxes} at {image_id}({idx})-{corrupted_region_ids}({corrupted_indices})")
+            input_boxes[:, [0, 2]] = np.clip(input_boxes[:, [0, 2]], None, image_width-1)
+
+        if np.any(input_boxes[:, [1, 3]] >= image_height):
+            corrupted_indices = np.where(input_boxes[:, [1, 3]] >= image_height)[0]
+            corrupted_boxes = input_boxes[corrupted_indices]
+            corrupted_region_ids = [region_ids[i] for i in corrupted_indices]
+            logger.error(f"[{image_id}({idx})]\tinput_boxes[:, [1, 3]] >= image_height({image_height}),\tgot {corrupted_boxes} at {image_id}({idx})-{corrupted_region_ids}({corrupted_indices})")
+            input_boxes[:, [1, 3]] = np.clip(input_boxes[:, [1, 3]], None, image_height-1)
+
+        nonempty_bool = self.nonempty(input_boxes)
+        if np.any(~nonempty_bool):
+            corrupted_indices = np.where(~nonempty_bool)[0]
+            corrupted_boxes = input_boxes[corrupted_indices]
+            corrupted_region_ids = [region_ids[i] for i in corrupted_indices]
+            logger.error(f"[{image_id}({idx})]\tempty box,\tgot {corrupted_boxes} at {image_id}({idx})-{corrupted_region_ids}({corrupted_indices})")
+            # nonempty_indices = np.where(nonempty_bool)[0]
+            # input_boxes = input_boxes[nonempty_indices]
+            # gt_captions = [gt_captions[i] for i in nonempty_indices]
+            # region_ids = [region_ids[i] for i in nonempty_indices]
+            empty_indices = np.where(~nonempty_bool)[0]
+            input_boxes[empty_indices] = np.array([0, 0, 1, 1])
+            logger.warning(f"[{image_id}({idx})]\tset empty box to [0, 0, 1, 1]\tgot {corrupted_boxes} at {image_id}({idx})-{corrupted_region_ids}({corrupted_indices})")
+
+        return input_boxes, gt_captions, region_ids
+
+    @staticmethod
+    def nonempty(box, threshold: float = 0.0) -> torch.Tensor:
+        """
+        Find boxes that are non-empty.
+        A box is considered empty, if either of its side is no larger than threshold.
+
+        Returns:
+            Tensor:
+                a binary vector which represents whether each box is empty
+                (False) or non-empty (True).
+        """
+        widths = box[:, 2] - box[:, 0]
+        heights = box[:, 3] - box[:, 1]
+        keep = (widths > threshold) & (heights > threshold)
+        return keep
 
     def build_dataloader(self, batch_size=1, num_workers=4, shuffle=False):
         if batch_size != 1:
@@ -119,6 +219,27 @@ class InferenceDataset(Dataset):
             shuffle=shuffle,
             collate_fn=_collate_func,
         )
+
+# NOTE: Test the dataset loading
+if os.getenv("TEST_DATASET_LOADING") is not None:
+    split = os.getenv("TEST_DATASET_LOADING_SPLIT", "test")
+    eval_dataset = prepare_dataset(split=split)
+    eval_infer_dataset = InferenceDataset(eval_dataset)
+    logger.info(f"TEST_DATASET_LOADING: {os.getenv('TEST_DATASET_LOADING')}")
+    for data in tqdm.tqdm(eval_infer_dataset.build_dataloader(num_workers=10)):
+        pass
+    exit()
+
+if os.getenv("RUN_CORRUPTED_BOXES") is not None:
+    eval_dataset = prepare_dataset(split="test")
+    eval_infer_dataset = InferenceDataset(eval_dataset)
+    logger.info(f"RUN_CORRUPTED_BOXES: {os.getenv('RUN_CORRUPTED_BOXES')}")
+    # NOTE: the real corrpted 1864, ValueError: len(pred_captions) != len(gt_captions): 62 != 63 at 4
+    # corrupted_boxes_ids = [295,528,697,1369,2049,2292,2569,2779,3393,3482,3685,3810,4794,4811]
+    corrupted_boxes_ids = [1864]
+    eval_infer_dataset = InferenceDataset(eval_dataset, sample_ids=corrupted_boxes_ids)
+    for data in tqdm.tqdm(eval_infer_dataset.build_dataloader(num_workers=0)):
+        pass
 
 
 class PromptableGRiTInferenceEngine:
@@ -231,6 +352,8 @@ class PromptableGRiTInferenceEngine:
                 pred_captions = batch["pred_captions"]
                 gt_captions = batch["gt_captions"]
                 input_boxes = batch["input_boxes"]
+                if isinstance(input_boxes, np.ndarray):
+                    input_boxes = input_boxes.tolist()
                 region_ids = batch["region_ids"]
 
                 image_id = batch["image_id"]
@@ -380,7 +503,7 @@ class PromptableGRiTInferenceEngine:
         predictions = self.model.inference(
             [inputs],
             encoded_image_dict=encoded_image_dict,
-            replace_pred_boxes_with_proposals=True,
+            replace_pred_boxes_with_gt_proposals=True,
         )[
             0
         ]  # Assign proposals
@@ -420,8 +543,9 @@ args.cpu = False
 
 infer_engine = PromptableGRiTInferenceEngine(args)
 
-eval_dataset = prepare_dataset(split="test")
-eval_infer_dataset = InferenceDataset(eval_dataset)
+if os.getenv("RUN_CORRUPTED_BOXES") is None:
+    eval_dataset = prepare_dataset(split="test")
+    eval_infer_dataset = InferenceDataset(eval_dataset)
 
 # NOTE: max_samples=10 is for debugging
 results = infer_engine.inference_dataset(eval_infer_dataset, split_name="inference")

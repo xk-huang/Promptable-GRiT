@@ -148,7 +148,7 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
                 proposals[0].foreground[0] = 1
         return proposals
 
-    def _forward_box(self, features, proposals, targets=None, task="ObjectDet", replace_pred_boxes_with_proposals=False):
+    def _forward_box(self, features, proposals, targets=None, task="ObjectDet", replace_pred_boxes_with_gt_proposals=False):
         if self.training:
             proposals = self.check_if_all_background(proposals, targets, 0)
         if (not self.training) and self.mult_proposal_score:
@@ -162,19 +162,24 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
         prev_pred_boxes = None
         image_sizes = [x.image_size for x in proposals]
 
-        for k in range(self.num_cascade_stages):
-            if k > 0:
-                proposals = self._create_proposals_from_boxes(
-                    prev_pred_boxes, image_sizes,
-                    logits=[p.objectness_logits for p in proposals])
-                if self.training:
-                    proposals = self._match_and_label_boxes_GRiT(
-                        proposals, k, targets)
-                    proposals = self.check_if_all_background(proposals, targets, k)
-            predictions = self._run_stage(features, proposals, k)
-            prev_pred_boxes = self.box_predictor[k].predict_boxes(
-                (predictions[0], predictions[1]), proposals)
-            head_outputs.append((self.box_predictor[k], predictions, proposals))
+        # NOTE: refine proposals. This may leads to change of input proposals
+        # `detectron2/modeling/meta_arch/rcnn.py:_postprocess` and `detectron2/modeling/postprocessing.py:detector_postprocess`
+        # will remove empty boxes and scale box back to original image scale, which leads to mismatch of proposals and pred_instances
+        # If your use `replace_pred_boxes_with_gt_proposals=True`, do not refine proposals.
+        if not replace_pred_boxes_with_gt_proposals:
+            for k in range(self.num_cascade_stages):
+                if k > 0:
+                    proposals = self._create_proposals_from_boxes(
+                        prev_pred_boxes, image_sizes,
+                        logits=[p.objectness_logits for p in proposals])
+                    if self.training:
+                        proposals = self._match_and_label_boxes_GRiT(
+                            proposals, k, targets)
+                        proposals = self.check_if_all_background(proposals, targets, k)
+                predictions = self._run_stage(features, proposals, k)
+                prev_pred_boxes = self.box_predictor[k].predict_boxes(
+                    (predictions[0], predictions[1]), proposals)
+                head_outputs.append((self.box_predictor[k], predictions, proposals))
 
         if self.training:
             object_features = self.object_feat_pooler(features, [x.proposal_boxes for x in proposals])
@@ -210,36 +215,7 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
             losses.update({'text_decoder_loss': text_decoder_loss})
             return losses
         else:
-            scores_per_stage = [h[0].predict_probs(h[1], h[2]) for h in head_outputs]
-            logits_per_stage = [(h[1][0],) for h in head_outputs]
-            scores = [
-                sum(list(scores_per_image)) * (1.0 / self.num_cascade_stages)
-                for scores_per_image in zip(*scores_per_stage)
-            ]
-            logits = [
-                sum(list(logits_per_image)) * (1.0 / self.num_cascade_stages)
-                for logits_per_image in zip(*logits_per_stage)
-            ]
-            if self.mult_proposal_score:
-                scores = [(s * ps[:, None]) ** 0.5 for s, ps in zip(scores, proposal_scores)]
-            predictor, predictions, proposals = head_outputs[-1]
-            boxes = predictor.predict_boxes(
-                (predictions[0], predictions[1]), proposals)
-            assert len(boxes) == 1
-            pred_instances, _ = self.fast_rcnn_inference_GRiT(
-                boxes,
-                scores,
-                logits,
-                image_sizes,
-                predictor.test_score_thresh,
-                predictor.test_nms_thresh,
-                predictor.test_topk_per_image,
-                self.soft_nms_enabled,
-            )
-
-            assert len(pred_instances) == 1, "Only support one image"
-
-            if replace_pred_boxes_with_proposals is True:
+            if replace_pred_boxes_with_gt_proposals is True:
                 logger.info(f"replace pred_boxes with proposals")
                 input_boxes = proposals[0].proposal_boxes.tensor
                 # NOTE: add 1 if there are same widths/heights
@@ -249,8 +225,37 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
                 input_boxes[:, 3] = y2
 
                 pred_instances = [
-                    Instances(pred_instances[0].image_size, pred_boxes=Boxes(input_boxes), scores=proposals[0].objectness_logits, pred_classes=torch.zeros(len(input_boxes), dtype=torch.int64))
+                    Instances(image_sizes[0], pred_boxes=Boxes(input_boxes), scores=proposals[0].objectness_logits, pred_classes=torch.zeros(len(input_boxes), dtype=torch.int64))
                 ]
+            else:
+                scores_per_stage = [h[0].predict_probs(h[1], h[2]) for h in head_outputs]
+                logits_per_stage = [(h[1][0],) for h in head_outputs]
+                scores = [
+                    sum(list(scores_per_image)) * (1.0 / self.num_cascade_stages)
+                    for scores_per_image in zip(*scores_per_stage)
+                ]
+                logits = [
+                    sum(list(logits_per_image)) * (1.0 / self.num_cascade_stages)
+                    for logits_per_image in zip(*logits_per_stage)
+                ]
+                if self.mult_proposal_score:
+                    scores = [(s * ps[:, None]) ** 0.5 for s, ps in zip(scores, proposal_scores)]
+                predictor, predictions, proposals = head_outputs[-1]
+                boxes = predictor.predict_boxes(
+                    (predictions[0], predictions[1]), proposals)
+                assert len(boxes) == 1
+                pred_instances, _ = self.fast_rcnn_inference_GRiT(
+                    boxes,
+                    scores,
+                    logits,
+                    image_sizes,
+                    predictor.test_score_thresh,
+                    predictor.test_nms_thresh,
+                    predictor.test_topk_per_image,
+                    self.soft_nms_enabled,
+                )
+
+            assert len(pred_instances) == 1, "Only support one image"
 
             for i, pred_instance in enumerate(pred_instances):
                 if len(pred_instance.pred_boxes) > 0:
@@ -308,7 +313,7 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
             return pred_instances
 
 
-    def forward(self, features, proposals, targets=None, targets_task="ObjectDet", replace_pred_boxes_with_proposals=False):
+    def forward(self, features, proposals, targets=None, targets_task="ObjectDet", replace_pred_boxes_with_gt_proposals=False):
         if self.training:
             proposals = self.label_and_sample_proposals(
                 proposals, targets)
@@ -322,7 +327,7 @@ class GRiTROIHeadsAndTextDecoder(CascadeROIHeads):
                 losses.update(self._get_empty_mask_loss(device=proposals[0].objectness_logits.device))
             return proposals, losses
         else:
-            pred_instances = self._forward_box(features, proposals, task=self.test_task, replace_pred_boxes_with_proposals=replace_pred_boxes_with_proposals)
+            pred_instances = self._forward_box(features, proposals, task=self.test_task, replace_pred_boxes_with_gt_proposals=replace_pred_boxes_with_gt_proposals)
             pred_instances = self.forward_with_given_boxes(features, pred_instances)
             return pred_instances, {}
 

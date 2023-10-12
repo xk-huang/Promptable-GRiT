@@ -27,7 +27,7 @@ class GRiT(GeneralizedRCNN):
         do_postprocess: bool = True,
         # NOTE: For multiple run inference on the same image without re-encoding
         encoded_image_dict: Optional[dict] = None,
-        replace_pred_boxes_with_proposals: bool = False,
+        replace_pred_boxes_with_gt_proposals: bool = False,
     ):
         assert not self.training
         assert detected_instances is None
@@ -45,7 +45,7 @@ class GRiT(GeneralizedRCNN):
             proposals = [x["proposals"].to(self.device) for x in batched_inputs]
         
         # NOTE: Modified to support multiple run inference on the same image without re-encoding
-        results, _ = self.roi_heads(features, proposals, replace_pred_boxes_with_proposals=replace_pred_boxes_with_proposals)
+        results, _ = self.roi_heads(features, proposals, replace_pred_boxes_with_gt_proposals=replace_pred_boxes_with_gt_proposals)
 
         if do_postprocess:
             assert not torch.jit.is_scripting(), \

@@ -257,7 +257,7 @@ class PromptableGRiTGradioApp:
             predictions = self.model.inference(
                 [inputs],
                 encoded_image_dict=encoded_image_dict,
-                replace_pred_boxes_with_proposals=False,
+                replace_pred_boxes_with_gt_proposals=False,
             )[
                 0
             ]  # Automatically generate proposals
@@ -291,7 +291,7 @@ class PromptableGRiTGradioApp:
             predictions = self.model.inference(
                 [inputs],
                 encoded_image_dict=encoded_image_dict,
-                replace_pred_boxes_with_proposals=True,
+                replace_pred_boxes_with_gt_proposals=True,
             )[
                 0
             ]  # Assign proposals
