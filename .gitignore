@@ -60,3 +60,5 @@ _darcs
 /projects/*/datasets
 /models
 /snippet
+
+/.data.cache

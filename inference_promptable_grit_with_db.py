@@ -6,6 +6,8 @@ import time
 from argparse import Namespace
 import multiprocessing as mp
 import os
+import sqlite3
+from contextlib import closing
 
 import detectron2.data.transforms as T
 import numpy as np
@@ -348,7 +350,11 @@ class PromptableGRiTInferenceEngine:
         return aug_transform, image, inputs, encoded_image_dict
 
     def inference_dataset(
-        self, dataset: InferenceDataset, split_name="inference", max_samples=None
+        self,
+        dataset: InferenceDataset,
+        split_name="inference",
+        max_samples=None,
+        db_file="inference_results.db",
     ):
         """_summary_
 
@@ -359,44 +365,90 @@ class PromptableGRiTInferenceEngine:
             _type_: _description_
         """
 
-        def save_results(queue, conn):
-            results = []
-            region_cnt = 0
-            while True:
-                batch = queue.get()
-                if batch is None:
-                    break
+        def save_results(queue, db_file):
+            with closing(sqlite3.connect(db_file)) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT MAX(_id) FROM results")
+                max_id = cursor.fetchone()[0]
+                if max_id is None:
+                    region_cnt = 0
+                else:
+                    region_cnt = max_id + 1
 
-                pred_captions = batch["pred_captions"]
-                gt_captions = batch["gt_captions"]
-                input_boxes = batch["input_boxes"]
-                if isinstance(input_boxes, np.ndarray):
-                    input_boxes = input_boxes.tolist()
-                region_ids = batch["region_ids"]
+                while True:
+                    batch = queue.get()
+                    if batch is None:
+                        break
 
-                image_id = batch["image_id"]
-                split_name = batch["split_name"]
+                    pred_captions = batch["pred_captions"]
+                    gt_captions = batch["gt_captions"]
+                    input_boxes = batch["input_boxes"]
+                    if isinstance(input_boxes, np.ndarray):
+                        input_boxes = input_boxes.tolist()
+                    region_ids = batch["region_ids"]
 
-                for pred_caption, gt_caption, input_box, region_id in zip(
-                    pred_captions, gt_captions, input_boxes, region_ids
-                ):
-                    result = dict(
-                        _id=region_cnt,
-                        split=split_name,
-                        references=gt_caption,
-                        candidates=pred_caption,
-                        metadata=dict(
-                            metadata_input_boxes=input_box,
-                            metadata_image_id=image_id,
-                            metadata_region_id=region_id,
-                        ),
-                        logits=dict(iou_scores=[1.0]),
+                    image_id = batch["image_id"]
+                    split_name = batch["split_name"]
+
+                    for pred_caption, gt_caption, input_box, region_id in zip(
+                        pred_captions, gt_captions, input_boxes, region_ids
+                    ):
+                        result = (
+                            region_cnt,
+                            split_name,
+                            json.dumps(gt_caption),
+                            json.dumps(pred_caption),
+                            json.dumps(input_box),
+                            image_id,
+                            region_id,
+                            json.dumps([1.0]),
+                        )
+                        region_cnt += 1
+
+                        conn.execute(
+                            """  
+                            INSERT INTO results (  
+                                _id, split, _references, candidates,  
+                                metadata_input_boxes, metadata_image_id, metadata_region_id,  
+                                logits_iou_scores  
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)  
+                        """,
+                            result,
+                        )
+
+                    # NOTE: commit after each batch
+                    conn.commit()
+
+        def result_exists(db_file, image_id, region_id):
+            with closing(sqlite3.connect(db_file)) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """  
+                    SELECT COUNT(*) FROM results  
+                    WHERE metadata_image_id = ? AND metadata_region_id = ?  
+                """,
+                    (image_id, region_id),
+                )
+                count = cursor.fetchone()[0]
+            return count > 0
+
+        def init_database(db_file):
+            with closing(sqlite3.connect(db_file)) as conn:
+                with conn:
+                    conn.execute(
+                        """  
+                        CREATE TABLE IF NOT EXISTS results (  
+                            _id INTEGER PRIMARY KEY,  
+                            split TEXT,  
+                            _references TEXT,  
+                            candidates TEXT,  
+                            metadata_input_boxes TEXT,  
+                            metadata_image_id INTEGER,  
+                            metadata_region_id INTEGER,  
+                            logits_iou_scores TEXT  
+                        )  
+                    """
                     )
-                    region_cnt += 1
-                    results.append(result)
-            # Send the results back to the main process through the Pipe
-            conn.send(results)
-            conn.close()
 
         # NOTE: num_workers=0 is for debugging
         dataloader = dataset.build_dataloader()
@@ -404,11 +456,12 @@ class PromptableGRiTInferenceEngine:
         if max_samples is None:
             max_samples = len(dataset)
 
+        # Initialize the SQLite database and start the save_results process
+        init_database(db_file)
+
         # Create a queue to store the results and start the saving process
-        result_queue = mp.Queue()
-        # Create a Pipe for communication between main process and subprocess
-        parent_conn, child_conn = mp.Pipe()
-        save_process = mp.Process(target=save_results, args=(result_queue, child_conn))
+        result_queue = mp.Queue(maxsize=50)
+        save_process = mp.Process(target=save_results, args=(result_queue, db_file))
         save_process.start()
 
         results = []
@@ -421,6 +474,11 @@ class PromptableGRiTInferenceEngine:
             gt_captions = batch["gt_captions"]
             image_id = batch["image_id"]
             region_ids = batch["region_ids"]
+
+            if all(
+                result_exists(db_file, image_id, region_id) for region_id in region_ids
+            ):
+                continue
 
             pred_captions = self.inference_text(input_image, input_boxes)
             if len(pred_captions) != len(gt_captions):
@@ -443,9 +501,6 @@ class PromptableGRiTInferenceEngine:
 
         # Wait for the saving process to complete and get the results
         save_process.join()
-        results = parent_conn.recv()
-
-        return results
 
     def inference_text(self, input_image, input_boxes):
         """_summary_
@@ -571,10 +626,43 @@ if os.getenv("RUN_CORRUPTED_BOXES") is None:
 max_samples = os.getenv("MAX_SAMPLES", None)
 if max_samples is not None:
     max_samples = int(max_samples)
+db_file = "inference_results.db"
 results = infer_engine.inference_dataset(
-    eval_infer_dataset, split_name="inference", max_samples=max_samples
+    eval_infer_dataset,
+    split_name="inference",
+    max_samples=max_samples,
+    db_file=db_file,
 )
 
+
+def convert_db_to_json(db_file, json_file):
+    with closing(sqlite3.connect(db_file)) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """  
+            SELECT _id, split, _references, candidates, metadata_input_boxes, metadata_image_id, metadata_region_id, logits_iou_scores
+            FROM results  
+        """
+        )
+        results = cursor.fetchall()
+    results = [
+        dict(
+            _id=_id,
+            split=split,
+            references=json.loads(gt_captions),
+            candidates=json.loads(pred_captions),
+            metadata=dict(
+                metadata_input_boxes=json.loads(input_boxes),
+                metadata_image_id=image_id,
+                metadata_region_id=region_id,
+            ),
+            logits=dict(iou_scores=json.loads(iou_scores)),
+        )
+        for _id, split, gt_captions, pred_captions, input_boxes, image_id, region_id, iou_scores in results
+    ]
+    with open(json_file, "w") as f:
+        json.dump(results, f, indent=4)
+
+
 json_file = "grit-vg-densecap-local.json"
-with open(json_file, "w") as f:
-    json.dump(results, f, indent=4)
+convert_db_to_json(db_file, json_file)

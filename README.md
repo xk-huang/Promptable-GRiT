@@ -21,6 +21,17 @@ python-dotenv==1.0.0
 ipython
 ```
 
+```
+mkdir models && cd models
+# wget https://datarelease.blob.core.windows.net/grit/models/grit_b_densecap_objectdet.pth
+wget https://datarelease.blob.core.windows.net/grit/models/grit_b_densecap.pth
+cd ..
+```
+
+## Performance
+
+TBD
+
 # GRiT: A Generative Region-to-text Transformer for Object Understanding
 GRiT is a general and open-set object understanding framework that localizes objects and
 describes them with any style of free-form texts it was trained with, e.g., class names, descriptive sentences 
