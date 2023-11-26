@@ -2,18 +2,9 @@
 
 Modified from https://github.com/JialianW/GRiT/.
 
-Add an gradio app to support inference with both automatic proposal generation and custom point/box prompts.
-Install gradio with `pip install gradio`.
+## Inference
 
-```python
-python promptable_grit_app.py
-```
-
-<p align="center"> <img src='docs/gradio.jpg' align="center" height="400px"> </p>
-
-# Inference
-
-## With HF datasets
+### Env
 
 ```
 datasets==2.13.1
@@ -28,9 +19,25 @@ wget https://datarelease.blob.core.windows.net/grit/models/grit_b_densecap.pth
 cd ..
 ```
 
-## Performance
+### Performance
 
-TBD
+| Method | C     | M    | S    | B@1  | B@2  | B@3  | B@4  | R    |
+|--------|-------|------|------|------|------|------|------|------|
+| GRiT   | 142.2 | 17.2 | 30.5 | 36.0 | 22.1 | 15.2 | 11.2 | 34.5 |
+
+The results is from [Segment and Caption Anything](https://github.com/xk-huang/segment-caption-anything), we also [benchmark referring vllm](https://github.com/xk-huang/benchmark-referring-vllm/tree/main).
+
+## Demo
+Add an gradio app to support inference with both automatic proposal generation and custom point/box prompts.
+Install gradio with `pip install gradio`.
+
+```python
+python promptable_grit_app.py
+```
+
+<p align="center"> <img src='docs/gradio.jpg' align="center" height="400px"> </p>
+
+
 
 # GRiT: A Generative Region-to-text Transformer for Object Understanding
 GRiT is a general and open-set object understanding framework that localizes objects and
@@ -131,10 +138,27 @@ To train on single machine node, run:
 python train_deepspeed.py --num-gpus-per-machine 8 --config-file configs/GRiT_B_ObjectDet.yaml --output-dir-name ./output/grit_b_objectdet
 ~~~
 
+
 To train on multiple machine nodes, run:
 ~~~
 python train_deepspeed.py --num-machines 4 --num-gpus-per-machine 8 --config-file configs/GRiT_B_ObjectDet.yaml --output-dir-name ./output/grit_b_objectdet
 ~~~
+
+### Train without deepspeed
+
+Fix the problem of "AttributeError: module 'distutils' has no attribute 'version'" in `torch.utils.tensorboard` by `pip install setuptools==59.5.0`
+- https://github.com/pytorch/pytorch/issues/69894#issuecomment-1080635462
+
+```
+python train_net.py --num-gpus-per-machine 1 --config-file configs/GRiT_B_DenseCap.yaml --output-dir-name ./output/reimp-grit_b_densecap \
+DATALOADER.DATASET_BS 1 \
+DATALOADER.NUM_WORKERS 0
+# Original DATALOADER.DATASET_BS 2, the GPU memory takes 24G
+# from PIL import Image
+# Image.fromarray(data[0]["image"].permute(1,2,0).numpy()).save("haha.jpg")
+# [batched_inputs[0]["image"].shape] + [i.shape for i in features.values()]
+# instances.gt_boxes.nonempty()
+```
 
 ## Acknowledgement
 Our code is in part based on [Detic](https://github.com/facebookresearch/Detic),

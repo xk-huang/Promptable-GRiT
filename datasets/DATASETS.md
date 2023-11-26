@@ -35,6 +35,19 @@ Dataset strcture should look like:
       |-- |-- |-- train.json
       |-- |-- |-- test.json
   ~~~
+### Copy vg from azure
+
+```shell
+# azcopy cp 'https://?.blob.core.windows.net/?/data_raw/VisualGenome/VG_image/?sv=' datasets/vg --recursive
+# Go to VG official site and download the data.
+mv datasets/vg/VG_image datasets/vg/images
+
+mkdir datasets/vg/annotations
+cd $_
+wget https://datarelease.blob.core.windows.net/grit/VG_preprocessed_annotations/train.json
+wget https://datarelease.blob.core.windows.net/grit/VG_preprocessed_annotations/test.json
+cd -
+```
 
 ## References
 Please cite the corresponding references if you use the datasets.
@@ -60,3 +73,5 @@ Please cite the corresponding references if you use the datasets.
   publisher={Springer}
 }
 ~~~
+
+
