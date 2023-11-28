@@ -1,6 +1,6 @@
 # Promptable GRiT
 
-Modified from https://github.com/JialianW/GRiT/.
+Modified from https://github.com/JialianW/GRiT/. For comparisons in "[Segment and Caption Anything](https://github.com/xk-huang/segment-caption-anything)".
 
 ## Inference
 
